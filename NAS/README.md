@@ -29,6 +29,7 @@ docker compose -f docker-compose.radicale.yml up -d
 - `POST /status_update` — accepts calendar state JSON and republishes to MQTT.
 - `GET /radicale/list` — lists events from Radicale as JSON (optional).
 - `POST /radicale/upsert` — upserts `uid` + `vevent` (optional).
+- `GET /health` — returns MQTT connection status and details of the last published state.
 
 ### Env
 - `NTFY_STATUS_TOPIC` must match your Power Automate ntfy POST URL.

@@ -82,13 +82,45 @@ def _enrich_state_with_local_times(state):
     return state
 
 client = mqtt.Client(client_id=f"office-sign-bridge@{socket.gethostname()}")
+mqtt_connected = False
+_state_lock = threading.Lock()
+_last_state = None
+_last_state_at = 0.0
+
+
+def _record_state(state):
+    global _last_state, _last_state_at
+    with _state_lock:
+        _last_state = state
+        _last_state_at = time.time()
+
+
+def publish_state(state):
+    payload = json.dumps(state)
+    client.publish(TOPIC_STATE, payload, qos=0, retain=True)
+    try:
+        sanitized = json.loads(payload)
+    except Exception:
+        sanitized = state
+    _record_state(sanitized)
 
 def on_connect(c, *_):
+    global mqtt_connected
+    mqtt_connected = True
     log("MQTT connected")
     c.subscribe(TOPIC_RING)
-    c.publish(TOPIC_STATE, json.dumps({
-        "status":"free","now":{"title":""},"next":{"title":"Bridge online"},"at": now_iso()
-    }), qos=0, retain=True)
+    publish_state({
+        "status": "free",
+        "now": {"title": ""},
+        "next": {"title": "Bridge online"},
+        "at": now_iso(),
+    })
+
+
+def on_disconnect(c, userdata, rc):
+    global mqtt_connected
+    mqtt_connected = False
+    log("MQTT disconnected", rc)
 
 def on_message(c, _, msg):
     if msg.topic == TOPIC_RING:
@@ -98,6 +130,7 @@ def on_message(c, _, msg):
         notify_all("🔔 Someone tapped RING at your office sign.")
 
 client.on_connect = on_connect
+client.on_disconnect = on_disconnect
 client.on_message = on_message
 
 class Handler(BaseHTTPRequestHandler):
@@ -112,6 +145,10 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(200, json.dumps({"events": out}))
             except Exception as e:
                 return self._send(500, json.dumps({"error": str(e)}))
+
+        if self.path == "/health":
+            return self._send(200, json.dumps(_health_snapshot()))
+
         return self._send(404, '{"error":"not found"}')
 
     def do_POST(self):
@@ -125,7 +162,7 @@ class Handler(BaseHTTPRequestHandler):
             except Exception:
                 return self._send(400, '{"error":"invalid json"}')
             data = _enrich_state_with_local_times(data)
-            client.publish(TOPIC_STATE, json.dumps(data), qos=0, retain=True)
+            publish_state(data)
             log("State update via HTTP:", data)
             return self._send(200, '{"ok":true}')
 
@@ -199,7 +236,7 @@ def ntfy_status_thread():
                         log("ntfy payload not a state object; skipping:", str(state)[:120])
                         continue
                     state = _enrich_state_with_local_times(state)
-                    client.publish(TOPIC_STATE, json.dumps(state), qos=0, retain=True)
+                    publish_state(state)
                     log("ntfy status -> MQTT (state):", state)
         except Exception as e:
             log("ntfy SSE connection error:", e)
@@ -241,6 +278,26 @@ def _rad_put(uid, vevent_text):
     r.raise_for_status()
     return {"ok": True, "status": r.status_code}
 
+def _health_snapshot():
+    with _state_lock:
+        state = _last_state
+        at = _last_state_at
+    now_ts = time.time()
+    age = (now_ts - at) if at else None
+    last_iso = (
+        datetime.fromtimestamp(at, timezone.utc).isoformat(timespec="seconds")
+        if at
+        else ""
+    )
+    return {
+        "ok": True,
+        "mqtt_connected": mqtt_connected,
+        "last_state_at": last_iso,
+        "last_state_age": round(age, 1) if age is not None else None,
+        "last_state": state,
+    }
+
+
 def main():
     client.connect(MQTT_HOST, MQTT_PORT, 60)
     client.loop_start()
@@ -255,7 +312,7 @@ def main():
         if PUBLISH_INTERVAL and (time.time()-last) >= PUBLISH_INTERVAL:
             state = {"status":"busy","now":{"title":"In a meeting"},"next":{"title":"Next thing"},"at": now_iso()}
             state = _enrich_state_with_local_times(state)
-            client.publish(TOPIC_STATE, json.dumps(state), qos=0, retain=True)
+            publish_state(state)
             last = time.time()
         time.sleep(0.05)
 
