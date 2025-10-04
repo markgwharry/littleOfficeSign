@@ -83,12 +83,40 @@ def _enrich_state_with_local_times(state):
 
 client = mqtt.Client(client_id=f"office-sign-bridge@{socket.gethostname()}")
 
+_state_lock = threading.Lock()
+_latest_state = None
+
+
+def _clone(obj):
+    try:
+        return json.loads(json.dumps(obj))
+    except Exception:
+        return None
+
+
+def _set_latest_state(state):
+    if not isinstance(state, dict):
+        return
+    with _state_lock:
+        global _latest_state
+        _latest_state = _clone(state) or state
+
+
+def _get_latest_state():
+    with _state_lock:
+        return _clone(_latest_state)
+
 def on_connect(c, *_):
     log("MQTT connected")
     c.subscribe(TOPIC_RING)
-    c.publish(TOPIC_STATE, json.dumps({
-        "status":"free","now":{"title":""},"next":{"title":"Bridge online"},"at": now_iso()
-    }), qos=0, retain=True)
+    state = {
+        "status": "free",
+        "now": {"title": ""},
+        "next": {"title": "Bridge online"},
+        "at": now_iso(),
+    }
+    _set_latest_state(state)
+    c.publish(TOPIC_STATE, json.dumps(state), qos=0, retain=True)
 
 def on_message(c, _, msg):
     if msg.topic == TOPIC_RING:
@@ -106,6 +134,9 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers(); self.wfile.write(body.encode())
 
     def do_GET(self):
+        if self.path == "/status":
+            state = _get_latest_state()
+            return self._send(200, json.dumps({"ok": True, "state": state}))
         if self.path == "/radicale/list":
             try:
                 out = _rad_list()
@@ -126,6 +157,7 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(400, '{"error":"invalid json"}')
             data = _enrich_state_with_local_times(data)
             client.publish(TOPIC_STATE, json.dumps(data), qos=0, retain=True)
+            _set_latest_state(data)
             log("State update via HTTP:", data)
             return self._send(200, '{"ok":true}')
 
@@ -200,6 +232,7 @@ def ntfy_status_thread():
                         continue
                     state = _enrich_state_with_local_times(state)
                     client.publish(TOPIC_STATE, json.dumps(state), qos=0, retain=True)
+                    _set_latest_state(state)
                     log("ntfy status -> MQTT (state):", state)
         except Exception as e:
             log("ntfy SSE connection error:", e)
@@ -256,6 +289,7 @@ def main():
             state = {"status":"busy","now":{"title":"In a meeting"},"next":{"title":"Next thing"},"at": now_iso()}
             state = _enrich_state_with_local_times(state)
             client.publish(TOPIC_STATE, json.dumps(state), qos=0, retain=True)
+            _set_latest_state(state)
             last = time.time()
         time.sleep(0.05)
 
