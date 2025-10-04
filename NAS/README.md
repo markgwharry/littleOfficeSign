@@ -27,6 +27,7 @@ docker compose -f docker-compose.radicale.yml up -d
 
 ### Bridge HTTP endpoints
 - `POST /status_update` — accepts calendar state JSON and republishes to MQTT.
+- `GET /healthz` — returns uptime, MQTT connection status, and the most recent state metadata.
 - `GET /radicale/list` — lists events from Radicale as JSON (optional).
 - `POST /radicale/upsert` — upserts `uid` + `vevent` (optional).
 

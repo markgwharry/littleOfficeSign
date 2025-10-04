@@ -31,6 +31,13 @@ RAD_USER = os.getenv("RAD_USER","")
 RAD_PASS = os.getenv("RAD_PASS","")
 RAD_PATH = os.getenv("RAD_PATH","/user/calendar/")
 
+START_TS = time.time()
+
+_last_state_lock = threading.Lock()
+LAST_STATE = None
+LAST_STATE_SOURCE = None
+LAST_STATE_AT = None
+
 def now_iso(): return datetime.now(timezone.utc).isoformat(timespec="seconds")
 def log(*a): print(datetime.now().strftime("%Y-%m-%d %H:%M:%S"), *a, flush=True)
 
@@ -83,12 +90,39 @@ def _enrich_state_with_local_times(state):
 
 client = mqtt.Client(client_id=f"office-sign-bridge@{socket.gethostname()}")
 
+def _clone_state(state):
+    try:
+        return json.loads(json.dumps(state))
+    except Exception:
+        return state
+
+def _record_state(state, source):
+    global LAST_STATE, LAST_STATE_SOURCE, LAST_STATE_AT
+    snapshot = _clone_state(state)
+    with _last_state_lock:
+        LAST_STATE = snapshot
+        LAST_STATE_SOURCE = source
+        LAST_STATE_AT = time.time()
+
+def _state_snapshot():
+    with _last_state_lock:
+        state = _clone_state(LAST_STATE) if LAST_STATE is not None else None
+        source = LAST_STATE_SOURCE
+        at = LAST_STATE_AT
+    age = time.time() - at if at else None
+    return state, source, age
+
 def on_connect(c, *_):
     log("MQTT connected")
     c.subscribe(TOPIC_RING)
-    c.publish(TOPIC_STATE, json.dumps({
-        "status":"free","now":{"title":""},"next":{"title":"Bridge online"},"at": now_iso()
-    }), qos=0, retain=True)
+    initial_state = {
+        "status": "free",
+        "now": {"title": ""},
+        "next": {"title": "Bridge online"},
+        "at": now_iso()
+    }
+    c.publish(TOPIC_STATE, json.dumps(initial_state), qos=0, retain=True)
+    _record_state(initial_state, "mqtt_connect")
 
 def on_message(c, _, msg):
     if msg.topic == TOPIC_RING:
@@ -106,6 +140,18 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers(); self.wfile.write(body.encode())
 
     def do_GET(self):
+        if self.path == "/healthz":
+            state, source, age = _state_snapshot()
+            payload = {
+                "ok": True,
+                "uptime_s": round(time.time() - START_TS, 1),
+                "mqtt_connected": bool(client.is_connected()),
+                "last_state_source": source,
+                "last_state_age_s": round(age, 1) if age is not None else None,
+                "last_state": state
+            }
+            return self._send(200, json.dumps(payload))
+
         if self.path == "/radicale/list":
             try:
                 out = _rad_list()
@@ -127,6 +173,7 @@ class Handler(BaseHTTPRequestHandler):
             data = _enrich_state_with_local_times(data)
             client.publish(TOPIC_STATE, json.dumps(data), qos=0, retain=True)
             log("State update via HTTP:", data)
+            _record_state(data, "http")
             return self._send(200, '{"ok":true}')
 
         if self.path == "/radicale/upsert":
@@ -201,6 +248,7 @@ def ntfy_status_thread():
                     state = _enrich_state_with_local_times(state)
                     client.publish(TOPIC_STATE, json.dumps(state), qos=0, retain=True)
                     log("ntfy status -> MQTT (state):", state)
+                    _record_state(state, "ntfy")
         except Exception as e:
             log("ntfy SSE connection error:", e)
             time.sleep(5)
@@ -256,6 +304,7 @@ def main():
             state = {"status":"busy","now":{"title":"In a meeting"},"next":{"title":"Next thing"},"at": now_iso()}
             state = _enrich_state_with_local_times(state)
             client.publish(TOPIC_STATE, json.dumps(state), qos=0, retain=True)
+            _record_state(state, "ticker")
             last = time.time()
         time.sleep(0.05)
 
