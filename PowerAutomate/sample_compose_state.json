@@ -1,0 +1,11 @@
+{
+  "status": "@{if(greater(length(body('Filter_array_current')), 0), 'busy', 'free')}",
+  "now": {
+    "title": "@{if(greater(length(body('Filter_array_current')),0), first(body('Filter_array_current'))?['subject'], '')}",
+    "end": "@{if(greater(length(body('Filter_array_current')),0), first(body('Filter_array_current'))?['endWithTimeZone'], '')}"
+  },
+  "next": {
+    "title": "@{if(greater(length(body('Filter_array_next')),0), first(body('Filter_array_next'))?['subject'], '')}",
+    "start": "@{if(greater(length(body('Filter_array_next')),0), first(body('Filter_array_next'))?['startWithTimeZone'], '')}"
+  }
+}

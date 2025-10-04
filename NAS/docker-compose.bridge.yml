@@ -1,0 +1,49 @@
+version: "3.9"
+services:
+  office-sign-bridge:
+    build:
+      context: .
+      dockerfile: Dockerfile.bridge
+    container_name: office-sign-bridge
+    restart: unless-stopped
+    ports:
+      - "8787:8787"
+    environment:
+      - MQTT_HOST=mosquitto
+      - MQTT_PORT=1883
+      - PUBLISH_INTERVAL=0
+      - DISPLAY_TZ=Europe/London
+      # Notifications (optional)
+      # - TEAMS_WEBHOOK=
+      # - FLOW_URL=
+      # ntfy status subscription (Flow -> ntfy -> bridge)
+      - NTFY_STATUS_URL=https://ntfy.sh
+      - NTFY_STATUS_TOPIC=office-sign-status-CHANGE-ME
+      # ntfy alerts on ring (optional)
+      # - NTFY_URL=https://ntfy.sh/alerts-topic
+      # Radicale (optional for two-way sync APIs)
+      # - RAD_URL=https://calendar.nas
+      # - RAD_USER=youruser
+      # - RAD_PASS=yourpass
+      # - RAD_PATH=/youruser/calendar/
+    depends_on:
+      - mosquitto
+    networks:
+      - signnet
+
+  mosquitto:
+    image: eclipse-mosquitto:2
+    container_name: mosquitto
+    restart: unless-stopped
+    ports:
+      - "1883:1883"
+    volumes:
+      - ./mosquitto/config:/mosquitto/config
+      - ./mosquitto/data:/mosquitto/data
+      - ./mosquitto/log:/mosquitto/log
+    networks:
+      - signnet
+
+networks:
+  signnet:
+    driver: bridge
