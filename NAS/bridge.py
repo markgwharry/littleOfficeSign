@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 import os, time, json, socket, threading
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 import requests
@@ -30,6 +30,10 @@ RAD_URL  = os.getenv("RAD_URL","").rstrip("/")
 RAD_USER = os.getenv("RAD_USER","")
 RAD_PASS = os.getenv("RAD_PASS","")
 RAD_PATH = os.getenv("RAD_PATH","/user/calendar/")
+
+# Direct ICS calendar URL (M365 shared calendar link)
+ICS_CALENDAR_URL = os.getenv("ICS_CALENDAR_URL", "").strip()
+ICS_POLL_INTERVAL = int(os.getenv("ICS_POLL_INTERVAL", "60"))  # seconds
 
 def now_iso(): return datetime.now(timezone.utc).isoformat(timespec="seconds")
 def log(*a): print(datetime.now().strftime("%Y-%m-%d %H:%M:%S"), *a, flush=True)
@@ -274,11 +278,163 @@ def _rad_put(uid, vevent_text):
     r.raise_for_status()
     return {"ok": True, "status": r.status_code}
 
+
+def _humanize_minutes(minutes: int) -> str:
+    """Convert minutes to human-readable string like '12m' or '1h 30m'."""
+    if minutes < 0:
+        return ""
+    if minutes < 60:
+        return f"{minutes}m"
+    hours = minutes // 60
+    mins = minutes % 60
+    if mins == 0:
+        return f"{hours}h"
+    return f"{hours}h {mins}m"
+
+
+def _fetch_and_parse_ics():
+    """Fetch ICS calendar and determine current/next meeting status."""
+    if not ICS_CALENDAR_URL:
+        return None
+
+    try:
+        r = requests.get(ICS_CALENDAR_URL, timeout=30)
+        r.raise_for_status()
+    except Exception as e:
+        log("ICS fetch error:", e)
+        return None
+
+    try:
+        cal = Calendar.from_ical(r.content)
+    except Exception as e:
+        log("ICS parse error:", e)
+        return None
+
+    target_tz = tz.gettz(DISPLAY_TZ) or tz.gettz("Europe/London")
+    now = datetime.now(target_tz)
+    today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    today_end = now.replace(hour=23, minute=59, second=59, microsecond=999999)
+
+    events = []
+    for comp in cal.walk():
+        if comp.name != "VEVENT":
+            continue
+
+        summary = str(comp.get("summary") or "")
+        dtstart = comp.get("dtstart")
+        dtend = comp.get("dtend")
+
+        if not dtstart:
+            continue
+
+        start_dt = dtstart.dt
+        end_dt = dtend.dt if dtend else None
+
+        # Handle all-day events (date without time)
+        if not hasattr(start_dt, 'hour'):
+            # All-day event - skip for busy/free calculation
+            continue
+
+        # Ensure timezone awareness
+        if start_dt.tzinfo is None:
+            start_dt = start_dt.replace(tzinfo=timezone.utc)
+        start_dt = start_dt.astimezone(target_tz)
+
+        if end_dt:
+            if not hasattr(end_dt, 'hour'):
+                continue
+            if end_dt.tzinfo is None:
+                end_dt = end_dt.replace(tzinfo=timezone.utc)
+            end_dt = end_dt.astimezone(target_tz)
+
+        # Only consider events that end in the future
+        if end_dt and end_dt < now:
+            continue
+
+        # Only consider events starting within reasonable window (next 24 hours)
+        if start_dt > now + timedelta(hours=24):
+            continue
+
+        events.append({
+            "title": summary,
+            "start": start_dt,
+            "end": end_dt
+        })
+
+    # Sort by start time
+    events.sort(key=lambda e: e["start"])
+
+    # Find current meeting (now is between start and end)
+    current_meeting = None
+    next_meeting = None
+
+    for ev in events:
+        if ev["start"] <= now and ev["end"] and ev["end"] > now:
+            current_meeting = ev
+        elif ev["start"] > now and next_meeting is None:
+            next_meeting = ev
+
+    # Build state object
+    is_busy = current_meeting is not None
+
+    now_obj = {}
+    if current_meeting:
+        now_obj["title"] = current_meeting["title"]
+        if current_meeting["end"]:
+            now_obj["end"] = current_meeting["end"].isoformat()
+            minutes_left = int((current_meeting["end"] - now).total_seconds() / 60)
+            now_obj["end_local"] = _humanize_minutes(minutes_left)
+
+    next_obj = {}
+    if next_meeting:
+        next_obj["title"] = next_meeting["title"]
+        next_obj["start"] = next_meeting["start"].isoformat()
+        minutes_until = int((next_meeting["start"] - now).total_seconds() / 60)
+        if minutes_until <= 60:
+            next_obj["start_local"] = f"in {_humanize_minutes(minutes_until)}"
+        else:
+            next_obj["start_local"] = next_meeting["start"].strftime("%H:%M")
+
+    return {
+        "status": "busy" if is_busy else "free",
+        "now": now_obj,
+        "next": next_obj,
+        "at": now_iso()
+    }
+
+
+def ics_poll_thread():
+    """Poll the ICS calendar URL and publish state to MQTT."""
+    if not ICS_CALENDAR_URL:
+        log("ICS polling disabled (no ICS_CALENDAR_URL)")
+        return
+
+    log(f"ICS polling enabled, interval={ICS_POLL_INTERVAL}s")
+    log(f"ICS URL: {ICS_CALENDAR_URL[:60]}...")
+
+    last_state_hash = None
+
+    while True:
+        state = _fetch_and_parse_ics()
+        if state:
+            # Only publish if state changed (avoid MQTT spam)
+            state_hash = f"{state['status']}|{state.get('now',{}).get('title','')}|{state.get('next',{}).get('title','')}"
+            if state_hash != last_state_hash:
+                client.publish(TOPIC_STATE, json.dumps(state), qos=0, retain=True)
+                _set_latest_state(state)
+                log("ICS poll -> MQTT:", state)
+                last_state_hash = state_hash
+            else:
+                log("ICS poll: no change")
+
+        time.sleep(ICS_POLL_INTERVAL)
+
 def main():
     client.connect(MQTT_HOST, MQTT_PORT, 60)
     client.loop_start()
     threading.Thread(target=http_thread, daemon=True).start()
     threading.Thread(target=ntfy_status_thread, daemon=True).start()
+    threading.Thread(target=ics_poll_thread, daemon=True).start()
     last = 0.0
     if PUBLISH_INTERVAL == 0:
         log("Dummy ticker disabled (PUBLISH_INTERVAL=0)")
