@@ -1,4 +1,3 @@
-version: "3.9"
 services:
   office-sign-bridge:
     build:
@@ -6,44 +5,26 @@ services:
       dockerfile: Dockerfile.bridge
     container_name: office-sign-bridge
     restart: unless-stopped
+    env_file:
+      - ${OFFICE_SIGN_ENV_FILE:-/volume3/docker/personal/secrets/office-sign.env}
     ports:
-      - "8787:8787"
+      - "192.168.1.125:8787:8787"
     environment:
-      - MQTT_HOST=mosquitto
-      - MQTT_PORT=1883
-      - PUBLISH_INTERVAL=0
-      - DISPLAY_TZ=Europe/London
-      # Notifications (optional)
-      # - TEAMS_WEBHOOK=
-      # - FLOW_URL=
-      # ntfy status subscription (Flow -> ntfy -> bridge)
-      - NTFY_STATUS_URL=https://ntfy.sh
-      - NTFY_STATUS_TOPIC=office-sign-status-CHANGE-ME
-      # ntfy alerts on ring (optional)
-      # - NTFY_URL=https://ntfy.sh/alerts-topic
-      # Radicale (optional for two-way sync APIs)
-      # - RAD_URL=https://calendar.nas
-      # - RAD_USER=youruser
-      # - RAD_PASS=yourpass
-      # - RAD_PATH=/youruser/calendar/
-    depends_on:
-      - mosquitto
+      MQTT_HOST: mosquitto
+      MQTT_PORT: "1883"
+      DISPLAY_TZ: Europe/London
     networks:
-      - signnet
-
-  mosquitto:
-    image: eclipse-mosquitto:2
-    container_name: mosquitto
-    restart: unless-stopped
-    ports:
-      - "1883:1883"
-    volumes:
-      - ./mosquitto/config:/mosquitto/config
-      - ./mosquitto/data:/mosquitto/data
-      - ./mosquitto/log:/mosquitto/log
-    networks:
-      - signnet
+      - mqtt
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8787/health', timeout=5)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    labels:
+      com.centurylinklabs.watchtower.enable: "false"
 
 networks:
-  signnet:
-    driver: bridge
+  mqtt:
+    name: mosquito_default
+    external: true

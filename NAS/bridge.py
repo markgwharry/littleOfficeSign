@@ -112,17 +112,18 @@ def _get_latest_state():
 
 def on_connect(c, *_):
     log("MQTT connected")
-    c.subscribe(TOPIC_RING)
-    state = {
-        "status": "free",
-        "now": {"title": ""},
-        "next": {"title": "Bridge online"},
-        "at": now_iso(),
-    }
-    _set_latest_state(state)
-    c.publish(TOPIC_STATE, json.dumps(state), qos=0, retain=True)
+    # Subscribe to the retained state rather than overwriting it on every
+    # bridge restart/reconnect. This also seeds GET /status after startup.
+    c.subscribe([(TOPIC_RING, 0), (TOPIC_STATE, 0)])
 
 def on_message(c, _, msg):
+    if msg.topic == TOPIC_STATE:
+        try:
+            state = json.loads(msg.payload.decode())
+        except Exception:
+            return
+        _set_latest_state(state)
+        return
     if msg.topic == TOPIC_RING:
         try: data = json.loads(msg.payload.decode())
         except Exception: data = {"raw": msg.payload.decode(errors="ignore")}
@@ -138,10 +139,19 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers(); self.wfile.write(body.encode())
 
     def do_GET(self):
+        if self.path == "/health":
+            connected = client.is_connected()
+            return self._send(200 if connected else 503, json.dumps({
+                "ok": connected,
+                "mqtt": "connected" if connected else "disconnected",
+            }))
         if self.path == "/status":
             state = _get_latest_state()
             return self._send(200, json.dumps({"ok": True, "state": state}))
         if self.path == "/radicale/list":
+            auth = self.headers.get("Authorization", "")
+            if not SHARED_SECRET or auth != f"Bearer {SHARED_SECRET}":
+                return self._send(401, '{"error":"unauthorized"}')
             try:
                 out = _rad_list()
                 return self._send(200, json.dumps({"events": out}))
@@ -152,7 +162,7 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         if self.path == "/status_update":
             auth = self.headers.get("Authorization", "")
-            if SHARED_SECRET and auth != f"Bearer {SHARED_SECRET}":
+            if not SHARED_SECRET or auth != f"Bearer {SHARED_SECRET}":
                 return self._send(401, '{"error":"unauthorized"}')
             try:
                 ln = int(self.headers.get("content-length","0"))
@@ -166,6 +176,9 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, '{"ok":true}')
 
         if self.path == "/radicale/upsert":
+            auth = self.headers.get("Authorization", "")
+            if not SHARED_SECRET or auth != f"Bearer {SHARED_SECRET}":
+                return self._send(401, '{"error":"unauthorized"}')
             try:
                 ln = int(self.headers.get("content-length","0"))
                 data = json.loads(self.rfile.read(ln).decode("utf-8","ignore"))
