@@ -25,6 +25,10 @@
 #include <Preferences.h>
 #include <time.h>
 
+// Real credentials live in secrets.h, which is gitignored.
+// Copy secrets.example.h to secrets.h and fill it in before building.
+#include "secrets.h"
+
 // ----------- Pins (TFT on HSPI) -----------
 #define TFT_CS     15
 #define TFT_DC      2
@@ -41,9 +45,7 @@
 #define T_MOSI     32
 
 // ----------- Wi-Fi + MQTT ----------------
-const char* WIFI_SSID = "Mark & Kiwi IoT";
-const char* WIFI_PASS = "49Fmn5p5";
-const char* MQTT_HOST = "192.168.1.125";
+// WIFI_SSID, WIFI_PASS and MQTT_HOST come from secrets.h (see above).
 const uint16_t MQTT_PORT = 1883;
 const char* SUB_TOPIC = "office/sign/state";
 const char* PUB_RING  = "office/sign/ring";

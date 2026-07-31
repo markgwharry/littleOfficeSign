@@ -1,6 +1,10 @@
 .env
 *.env
 secrets/
+
+# Real credentials — template lives alongside as secrets.example.h
+ESP32/OfficeSign_Final/secrets.h
+
 __pycache__/
 *.pyc
 .pio/
